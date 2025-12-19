@@ -92,6 +92,37 @@ cleanup_old_versions() {
     done
 }
 
+cleanup_old_path_entries() {
+    echo "Cleaning up old PATH entries..."
+    
+    if [ "$GLOBAL_PATH_UPDATE" = true ]; then
+        # Clean up /etc/profile
+        if [ -f /etc/profile ]; then
+            # Create temp file without any flyway PATH entries
+            sudo grep -v 'export PATH=.*flyway-' /etc/profile > /tmp/profile.tmp || true
+            sudo mv /tmp/profile.tmp /etc/profile
+            echo "Removed all old Flyway PATH entries from /etc/profile"
+        fi
+    else
+        # Clean up user profile
+        USER_PROFILE=""
+        if [ -f "$HOME/.bashrc" ]; then
+            USER_PROFILE="$HOME/.bashrc"
+        elif [ -f "$HOME/.bash_profile" ]; then
+            USER_PROFILE="$HOME/.bash_profile"
+        elif [ -f "$HOME/.profile" ]; then
+            USER_PROFILE="$HOME/.profile"
+        fi
+        
+        if [ -n "$USER_PROFILE" ] && [ -f "$USER_PROFILE" ]; then
+            # Create temp file without any flyway PATH entries
+            grep -v 'export PATH=.*flyway-' "$USER_PROFILE" > "${USER_PROFILE}.tmp" || true
+            mv "${USER_PROFILE}.tmp" "$USER_PROFILE"
+            echo "Removed all old Flyway PATH entries from $USER_PROFILE"
+        fi
+    fi
+}
+
 # ---------------------------
 # Determine Flyway version
 # ---------------------------
@@ -116,33 +147,58 @@ INSTALL_DIR="$FLYWAY_INSTALL_DIR/flyway-$FLYWAY_VERSION"
 if [ -d "$INSTALL_DIR" ]; then
     echo "Flyway $FLYWAY_VERSION already installed at $INSTALL_DIR. Skipping download."
 else
-    echo "Downloading and installing Flyway $FLYWAY_VERSION..."
+    echo "Downloading Flyway $FLYWAY_VERSION from Red Gate..."
+    echo "Source: https://download.red-gate.com/maven/release/com/redgate/flyway/flyway-commandline/$FLYWAY_VERSION/"
+    
+    # Use temp directory for extraction to ensure we have write permissions
+    TEMP_EXTRACT_DIR=$(mktemp -d)
+    cd "$TEMP_EXTRACT_DIR"
+    
     wget -qO- "https://download.red-gate.com/maven/release/com/redgate/flyway/flyway-commandline/$FLYWAY_VERSION/flyway-commandline-$FLYWAY_VERSION-linux-x64.tar.gz" \
-        | tar -xvz
+        | tar -xz --no-same-owner
+    echo "Download and extraction complete."
 
+    echo "Installing Flyway to $INSTALL_DIR..."
     # Ensure parent directory exists (with or without sudo)
     if [ "$HAS_SUDO" = true ] && [[ "$FLYWAY_INSTALL_DIR" == /opt/* ]]; then
         sudo mkdir -p "$FLYWAY_INSTALL_DIR"
-        sudo mv "flyway-$FLYWAY_VERSION" "$INSTALL_DIR"
+        sudo mv "$TEMP_EXTRACT_DIR/flyway-$FLYWAY_VERSION" "$INSTALL_DIR"
     else
         mkdir -p "$FLYWAY_INSTALL_DIR"
-        mv "flyway-$FLYWAY_VERSION" "$INSTALL_DIR"
+        mv "$TEMP_EXTRACT_DIR/flyway-$FLYWAY_VERSION" "$INSTALL_DIR"
     fi
+    
+    # Cleanup temp directory
+    rm -rf "$TEMP_EXTRACT_DIR"
+    cd - >/dev/null
+    
+    echo "Installation complete."
 fi
 
 # ---------------------------
 # Update PATH for current session
 # ---------------------------
-export PATH="$INSTALL_DIR:$PATH"
-echo "PATH updated for current session: $PATH"
+# First, clean up any existing Flyway entries from current PATH to prevent bloat
+CLEANED_PATH=$(echo "$PATH" | tr ':' '\n' | grep -v "/flyway-" | tr '\n' ':' | sed 's/:$//')
+
+# Now add the new version
+export PATH="$INSTALL_DIR:$CLEANED_PATH"
+echo "PATH updated for current session (cleaned and updated)"
+echo "New PATH: $PATH"
 
 # ---------------------------
-# Persist PATH update
+# Cleanup old Flyway versions and PATH entries
+# ---------------------------
+cleanup_old_versions
+cleanup_old_path_entries
+
+# ---------------------------
+# Add current version to PATH in profile
 # ---------------------------
 if [ "$GLOBAL_PATH_UPDATE" = true ]; then
-    # System-wide update (requires sudo)
+    # System-wide update (requires sudo) - add back the current version
     if sudo sh -c "echo 'export PATH=\"$INSTALL_DIR:\$PATH\"' >> /etc/profile"; then
-        echo "Global PATH updated in /etc/profile"
+        echo "Added current Flyway version to /etc/profile"
     else
         echo "Warning: Could not update global PATH, continuing..."
     fi
@@ -162,13 +218,9 @@ else
         touch "$USER_PROFILE"
     fi
     
-    # Check if PATH entry already exists
-    if ! grep -q "$INSTALL_DIR" "$USER_PROFILE" 2>/dev/null; then
-        echo "export PATH=\"$INSTALL_DIR:\$PATH\"" >> "$USER_PROFILE"
-        echo "User PATH updated in $USER_PROFILE"
-    else
-        echo "PATH entry already exists in $USER_PROFILE"
-    fi
+    # Add current version to profile
+    echo "export PATH=\"$INSTALL_DIR:\$PATH\"" >> "$USER_PROFILE"
+    echo "Added current Flyway version to $USER_PROFILE"
     
     # For CI/CD: also add to GITHUB_PATH if it exists
     if [ -n "$GITHUB_PATH" ]; then
@@ -178,15 +230,26 @@ else
 fi
 
 # ---------------------------
-# Cleanup old Flyway versions
-# ---------------------------
-cleanup_old_versions
-
-# ---------------------------
 # Verify installation
 # ---------------------------
 if flyway --version >/dev/null 2>&1; then
     echo "Flyway $FLYWAY_VERSION installed successfully and running."
+    echo ""
+    echo "==========================================="
+    echo "IMPORTANT: To use the cleaned PATH in your current terminal:"
+    if [ "$GLOBAL_PATH_UPDATE" = true ]; then
+        echo "  Run: source /etc/profile"
+    else
+        if [ -f "$HOME/.bashrc" ]; then
+            echo "  Run: source ~/.bashrc"
+        elif [ -f "$HOME/.bash_profile" ]; then
+            echo "  Run: source ~/.bash_profile"
+        else
+            echo "  Run: source ~/.profile"
+        fi
+    fi
+    echo "Or start a new terminal session."
+    echo "==========================================="
 else
     echo "Flyway installation failed!"
     exit 1
