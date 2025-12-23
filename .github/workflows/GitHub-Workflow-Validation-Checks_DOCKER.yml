@@ -106,10 +106,23 @@ jobs:
         run: |
           docker cp "${GITHUB_WORKSPACE}/Scripts/CreateAutopilotDatabases.sql" $CONTAINER_NAME:/tmp/CreateAutopilotDatabases.sql
 
-      - name: Initialize database
+      - name: Initialize databases
         run: |
-          docker exec $CONTAINER_NAME /opt/mssql-tools/bin/sqlcmd \
-            -S localhost -U sa -P "$SA_PASSWORD" -i /tmp/CreateAutopilotDatabases.sql
+          echo "Running database initialization script..."
+          for i in {1..10}; do
+            if docker exec $CONTAINER_NAME /opt/mssql-tools/bin/sqlcmd \
+              -S localhost -U sa -P "$SA_PASSWORD" \
+              -i /tmp/CreateAutopilotDatabases.sql; then
+              echo "Database initialization succeeded."
+              exit 0
+            fi
+            echo "Initialization failed, retrying ($i/10)..."
+            sleep 10
+          done
+
+          echo "Database initialization failed after retries"
+          docker logs $CONTAINER_NAME
+          exit 1
 
       - name: Export connection info for Flyway
         run: |
